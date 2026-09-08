@@ -824,13 +824,28 @@ class X1DHStandEnv(LeggedRobot):
 # ================================================ Rewards ================================================== #
     def _reward_ref_joint_pos(self):
         """
-        Calculates the reward based on the difference between the current joint positions and the target joint positions.
+        exp0.4: 腿部（12 关节，leg_dof_indices）参考跟踪，权重 1.0（半量恢复）。
+        历史：exp0.3 全身 2.4 被贴地拖步白拿（rew+0.566）→ exp1 归零（AMP 接管，后 D 死锁等于形态裸奔）
+        → exp0.4 拆分上下半身：本函数只管腿，上半身见 _reward_ref_joint_pos_upper。
         """
-        joint_pos = self.dof_pos.clone()
-        pos_target = self.ref_dof_pos.clone()
         stand_command = (torch.norm(self.commands[:, :3], dim=1) <= self.cfg.commands.stand_com_threshold)
+        pos_target = self.ref_dof_pos.clone()
         pos_target[stand_command] = self.default_dof_pos.clone()
-        diff = joint_pos - pos_target
+        diff = self.dof_pos[:, self.leg_dof_indices] - pos_target[:, self.leg_dof_indices]
+        r = torch.exp(-2 * torch.norm(diff, dim=1)) - 0.2 * torch.norm(diff, dim=1).clamp(0, 0.5)
+        r[stand_command] = 1.0
+        return r
+
+    def _reward_ref_joint_pos_upper(self):
+        """
+        exp0.4 新增：上半身（17 关节，upper_dof_indices）贴 mocap 摆臂。
+        与平移零冲突；底模为 AMP 铺路（dof_pos 特征贴 demo 流形，exp1 死锁教训）。
+        依赖 upper_dof_indices（_init_mocap_lib 构建，use_mocap_ref=True 时存在）。
+        """
+        stand_command = (torch.norm(self.commands[:, :3], dim=1) <= self.cfg.commands.stand_com_threshold)
+        pos_target = self.ref_dof_pos.clone()
+        pos_target[stand_command] = self.default_dof_pos.clone()
+        diff = self.dof_pos[:, self.upper_dof_indices] - pos_target[:, self.upper_dof_indices]
         r = torch.exp(-2 * torch.norm(diff, dim=1)) - 0.2 * torch.norm(diff, dim=1).clamp(0, 0.5)
         r[stand_command] = 1.0
         return r

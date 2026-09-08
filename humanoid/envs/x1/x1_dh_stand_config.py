@@ -380,16 +380,18 @@ class X1DHStandCfg(LeggedRobotCfg):
         max_contact_force = 700  # forces above this value are penalized
         
         class scales:
-            # exp0.2: 2.2→1.8，上半身从常数变动态 mocap 目标，先降压防摆臂跟踪压制步态
-            # exp0.3: 1.8→2.4 压幅度后参考可实现（des≈±0.6-0.9 vs mocap±0.45），升压让查表参考主导
-            # exp1: 2.4→0.0 归零（用户拍板）——逐关节 L2 只管形态不管平移，恰给踏步发奖；
-            # 风格监督移交 AMP 判别器（保留则踏步白拿漏洞仍在且与 style 双重计分打架）
-            ref_joint_pos = 0.0
-            feet_clearance = 1.
+            # exp0.2: 2.2→1.8；exp0.3: 1.8→2.4（实测被贴地拖步白拿 rew+0.566）；exp1: 2.4→0.0（理由是 AMP 接管形态，
+            # 但 D 死锁后等于形态裸奔）。exp0.4: 0.0→1.0 半量恢复——AMP 关闭后归零理由失效；
+            # 保从零 bootstrap 稠密梯度，拖步偏置 ≈0.10/步（占 σ20 走-拖差 4.9 的 2%，噪声级）
+            ref_joint_pos = 1.0
+            # exp0.4 新增：上半身 17 关节贴 mocap 摆臂（补 exp1 归零误伤的手臂监督）——
+            # 与平移零冲突；底模 dof_pos 分布贴近 AMP demo 流形（exp1 死锁教训：手臂锁死 default 必被 D 平凡分离）
+            ref_joint_pos_upper = 1.5
+            feet_clearance = 1.5  # exp0.4: 1.0→1.5 治贴地拖步（exp0.3 CSV 实测抬脚峰值仅 0.9-1.7cm、clearance 带 0%）
             feet_contact_number = 2.0
             # gait
-            feet_air_time = 1.2
-            foot_slip = -0.1
+            feet_air_time = 1.6  # exp0.4: 1.2→1.6 抬脚收益对冲动态成本（治拖步）
+            foot_slip = -0.3  # exp0.4: -0.1→-0.3 防滑行——σ20 后"贴地滑行"可拿满 tracking（0.4m/s 滑行罚 0.06→0.19/步）
             feet_distance = 0.2   # exp0.3: 0.3→0.2 回退（exp0.2 证实带来 vx 过冲副作用，收益不明显）
             knee_distance = 0.2
             feet_contact_number = 2.4  # legacy exp1.3: 2.0→2.4 强化左右步节拍对称（治偏航离散累积）
@@ -411,7 +413,8 @@ class X1DHStandCfg(LeggedRobotCfg):
             base_height = 0.2
             base_acc = 0.2
             # energy
-            action_smoothness = -0.02  # exp0.3: -0.008→-0.02 压 bang-bang（含 |a| L1 + 一/二阶差分）；legacy exp1.4 曾 -0.002→-0.008 压真机踝振荡
+            action_smoothness = -0.012  # exp0.4: -0.02→-0.012 松绑抬腿动态——exp0.3 的 2.5 倍加压把抬脚压死（CSV 实测 0 腾空）；
+                                         # exp0.2 -0.008 时抬脚 8-28cm 正常，取中间值；legacy exp1.4 曾 -0.002→-0.008 压真机踝振荡
             torques = -8e-9
             dof_vel = -2e-8
             dof_acc = -1e-7
@@ -424,7 +427,8 @@ class X1DHStandCfg(LeggedRobotCfg):
 
     # ---- exp1: AMP 判别器（env 侧开关；算法侧超参见 X1DHStandCfgPPO.algorithm 的 amp_* 平铺键）----
     class amp:
-        enabled = True      # 总开关：False → env 不产 extras["amp"]，DHPPOAMP 自动退化为纯 task 基线（消融用）
+        enabled = False     # exp0.4: True→False 回归纯 task 底模——env 停产 extras["amp"]（省每步 demo 采样）；
+                            # exp1.3 重启 AMP 时改回 True 即可（DHPPOAMP 退化路径设计验证过）
         disc_obs_steps = 3  # 判别器时间窗（控制步），与 algorithm.amp_disc_obs_steps 保持一致
         demo_file = ''      # 空 → resources/motions/processed/ref_lib.pt（与 use_mocap_ref 同源）
 
@@ -459,7 +463,8 @@ class X1DHStandCfgPPO(LeggedRobotCfgPPO):
 
     class algorithm(LeggedRobotCfgPPO.algorithm):
         entropy_coef = 0.001
-        learning_rate = 1e-5
+        learning_rate = 3e-4  # exp0.4: 1e-5→3e-4 回滚——exp0.3/exp1 记录均为 3e-4 adaptive，
+                              # 现文件 1e-5 疑似 exp1.2 本地验证后未恢复；从零 6000 iter 在 1e-5 下欠收敛
         num_learning_epochs = 2
         gamma = 0.994
         lam = 0.9
@@ -471,7 +476,7 @@ class X1DHStandCfgPPO(LeggedRobotCfgPPO):
 
         # ---- exp1: AMP 判别器超参（FLAT 平铺键——class_to_dict 后作为 kwargs 直传 DHPPOAMP，
         # 嵌套 class 会变 dict 导致 **kwargs 展开类型不符）。数值照抄 robolab X1 实测（29DOF 同构）----
-        amp_enabled = True              # 与 env cfg amp.enabled 双闸，任一 False 即纯 task
+        amp_enabled = False             # exp0.4: True→False（与 env cfg amp.enabled 双闸）——configure_amp 早退、ckpt 不写 disc 键
         amp_disc_obs_steps = 3          # 判别器时间窗：183 = 3 × 61（61 = ang3+dof_pos29+dof_vel29）
         amp_disc_hidden_dims = [1024, 512]
         amp_disc_lr = 5e-5              # exp1.1: 1e-4→5e-5——exp1 判别器 86 iter 碾压饱和死锁，降速给 policy 追赶窗口（配合 demo 侧混静立窗）
