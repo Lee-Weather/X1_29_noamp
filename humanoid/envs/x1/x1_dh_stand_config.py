@@ -380,10 +380,11 @@ class X1DHStandCfg(LeggedRobotCfg):
         max_contact_force = 700  # forces above this value are penalized
         
         class scales:
-            # exp0.2: 2.2→1.8；exp0.3: 1.8→2.4（实测被贴地拖步白拿 rew+0.566）；exp1: 2.4→0.0（理由是 AMP 接管形态，
-            # 但 D 死锁后等于形态裸奔）。exp0.4: 0.0→1.0 半量恢复——AMP 关闭后归零理由失效；
-            # 保从零 bootstrap 稠密梯度，拖步偏置 ≈0.10/步（占 σ20 走-拖差 4.9 的 2%，噪声级）
-            ref_joint_pos = 1.0
+            # exp0.2: 2.2→1.8；exp0.3: 1.8→2.4（腿拉动了但拖步）；exp1: 2.4→0.0；exp0.4: 0.0→1.0
+            # → exp0.4 实测 1.0 拉力不足，摆动相从未出现（feet_air_time 全程≈0），站立吸引子完胜。
+            # exp0.5: 1.0→2.5 恢复强拉力——主次矛盾转换：先让腿动起来（白拿 ref 分 ~0.24/步 远小于
+            # σ20+low_speed 制造的位移差），摆动相出现后 air_time/clearance 稀疏奖励才有梯度可接
+            ref_joint_pos = 2.5
             # exp0.4 新增：上半身 17 关节贴 mocap 摆臂（补 exp1 归零误伤的手臂监督）——
             # 与平移零冲突；底模 dof_pos 分布贴近 AMP demo 流形（exp1 死锁教训：手臂锁死 default 必被 D 平凡分离）
             ref_joint_pos_upper = 1.5
