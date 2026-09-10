@@ -13,6 +13,9 @@
 | exp1 | 2026-09-07 | AMP 判别器引入（robolab 移植）：DHPPOAMP + LSGAN style reward lerp 融合替代 ref_joint_pos 逐关节 L2 + task 锐化（σ20/low_speed 加重）治踏步；demo 库复用 ref_lib.pt 三段差分特征。**失败**：D 86 iter 饱和死锁（agent -0.995 钉死、style≈0），1267 iter 止损（§8） | ❌失败 | TASK_20260907_046(停) | limxmtjqe95pp63oab（当前CLI） | — |
 | exp1.1 | 2026-09-07 | exp1 修复：demo 侧混静立窗 + disc_lr 减半。**失败**：it30 即钉死（比 exp1 更快），静立窗位形错配 + 平凡可分根因未除（§10）；083 转纯 task 锐化基线后亦被停 | ❌失败 | TASK_20260907_083(停) | 同上 | — |
 | exp1.2 | 2026-09-07 | §11 label smoothing 方案推翻（换 label 不解平凡可分）→ **exp0.2 底模 resume + AMP**：新增 --ckpt_path 直连加载；静立窗 default_dof_pos；**发现量纲淹没隐藏根因**（style 上限 0.015 vs task O(6)，梯度弱 60 倍）scale 1.5→100。训练全程监控"健康"（score 收窄/style 爬升/reward 翻倍）但**回放判死：0.4/0.6 指令完全冻结，行走能力被拆**（对照底模同流程会走）——站立成为新奖励面+静立窗 style 的 net 最优，监控三绿是站立体化假阳性（§12.7） | ❌失败（新失败模式） | TASK_20260907_113(新账号) | limxmtjqfkh52btio6 | model_11999.pt |
+| exp0.4 | 2026-09-08 | 回归纯 task 底模：AMP 双闸关闭 + ref 拆分（腿 1.0/上 1.5）+ lr 回滚 3e-4 + 治拖步四参数（smoothness -0.012/air 1.6/clearance 1.5/slip -0.3）；4090D 从零 6000 完成，但 **feet_air_time 全程≈0（摆动相从未出现）**，站立吸引子完胜；v1 任务因云端 mesh 缺失崩溃（Windows 复制丢软链接教训，commit a1c94a3 物化修复） | ❌失败（已测试） | TASK_20260908_283(崩)→301 | limxmt8fzq961ur9q2@emalupe.com | model_6000.pt |
+| exp0.5 | 2026-09-09 | ref_joint_pos 1.0→2.5 恢复腿部强拉力（exp0.4 实证 1.0 拉不出摆动相）；3655/6000 额度终止。回放 model_3200：**步态形首次出现**（抬脚峰值 27/16cm、腾空 373/540ms、带占比 32-43%，exp0.3 拖步全面逆转）但**一迈步就摔**（base_height min 0.169、ep_len 629=27%）。**根因大发现：termination 摔倒罚全程缺失**（基类 -0.0 + scales 重写无此键）——摔=零成本免费重置，解释 exp0.2/0.3/0.5 全部训练-回放背离 | ❌未达标（已测试，发现根本漏洞） | TASK_20260909_036 | limxmt8fzq961ur9q2@emalupe.com（额度耗尽） | model_3600.pt |
+| exp0.6 | 2026-09-10 | 补 termination 摔倒罚 -50（only_positive clip 后叠加机制已在位，负罚可生效）+ resume exp0.5 model_3600 续 3000——步态形已由 ref 2.5 拉出，摔罚教"稳住地走"；预期 ep_len 629→>1500、迈步不摔 | 待训练 | — | 待定（当前账号额度耗尽） | — |
 
 ---
 
@@ -824,3 +827,272 @@ score 差距 1.87→1.81 持续收窄、d_loss 0.02→0.05（D 越来越难分�
 1. **ref_joint_pos 2.4→0（推荐）vs 0.5 过渡**：推荐 0——踏步白拿漏洞必须在源头堵死；若担心风格突变过大，可 0.5 但接受归因混杂
 2. **从零（推荐）vs 续训 exp0.3**：续训收敛快（policy 已会站）但 action 分布已收敛、noise_std 低，AMP 新梯度注入效果存疑且归因混杂；从零干净
 3. **是否并行消融任务**（账号7/8 各 ¥50 可用）：amp=True 主实验 + amp=False（纯 task 锐化基线）各一任务并行——多花一份钱，买"AMP 是否真有贡献"的干净归因；不并行则失败时再补跑消融
+
+---
+
+## 实验 exp0.4：回归纯 task 底模（AMP 双闸关闭 + ref 拆分 + 治拖步）（2026-09-08）
+
+> 晋级依据：跨 ≥2 模块大改（AMP 关闭 + ref 结构拆分 + 四参数奖励面调整）——修改编号继承 exp0.3，从修改四起。
+
+### 1. 上一实验结果与教训
+
+> 数据：exp0.3 model_6000（零摔倒、cmd=0 段 vx 0.000-0.012、corr 左髋 0.908、clip 0；0.4/0.6 稳态 **5%/-2%**）+ CSV 复析（czy/analysis/exp0_3_foot_analysis.py）修正失败画像 + exp1.2（exp0.2 底模 resume 后行走被 AMP 拆，0.4/0.6 完全冻结）
+>
+> **CSV 复析修正 exp0.3 画像**：不是"原地踏步"而是**贴地拖步**——左脚 0ms 真实腾空、峰值离地仅 0.9-1.7cm（exp0.2 同段 8-28cm）、clearance 带占比 0%、踝 pos/des 幅度比 0.11-0.22（踝跟不上）、膝比 0.96（膝跟得上）。步态形 earning 仅 ≈2.4/步。
+>
+> **核心教训**：
+> - 证明了：exp0.3 三机制有效（幅度压制/站立调度/零摔倒）；exp1.2 证明底模决定 AMP 上限
+> - 否定了："原地踏步"归因——抬腿动态被 smoothness×2.5 压死 + 抬脚收益太薄 + 踝执行掉链子
+> - 本轮要解决：① 平移驱动（σ20 跑满）② 抬脚 ③ 手臂监督（exp1 归零误伤）④ 滑行预堵（σ20 后"贴地滑行"可拿满 tracking）
+
+### 2. 本轮修改目标
+
+- 目标1：0.4/0.6 稳态跟踪 80-120%
+- 目标2（新增）：抬脚——摆动窗峰值离地 ≥5cm、窗内腾空 ≥250ms、clearance 带占比 ≥30%
+- 目标3（继承）：零摔倒、cmd=0 段 |vx|<0.15、clip_count<200
+- 目标4（底模专项）：摆臂贴 mocap（rew_ref_joint_pos_upper ≥ +1.0）
+- 验收标准：目标 1+2+3 同时满足
+
+### 3. 修改内容
+
+### 修改四：AMP 双闸关闭 + lr 回滚（回归纯 task）
+
+| 参数 | 旧值 | 新值 | 说明 |
+| --- | --- | --- | --- |
+| `X1DHStandCfg.amp.enabled` / `algorithm.amp_enabled` | True | **False** | 双闸关闭，env 停产 extras["amp"]；`algorithm_class_name='DHPPOAMP'` 不动（退化路径验证过，exp1.3 可直接 resume） |
+| `algorithm.learning_rate` | 1e-5 | **3e-4** | 现文件与 exp0.3/exp1 记录不符，疑似 exp1.2 本地验证后未回滚；从零 6000 iter 在 1e-5 下欠收敛 |
+
+### 修改五：ref_joint_pos 上下半身拆分
+
+| 参数 | exp0.3 | exp1~现文件 | exp0.4 | 说明 |
+| --- | --- | --- | --- | --- |
+| `ref_joint_pos`（腿 12 关节） | 2.4 | 0.0 | **1.0** | AMP 归零理由随 AMP 关闭失效；半量恢复保 bootstrap 稠密梯度，拖步偏置 ≈0.10/步（占 σ20 走-拖差 4.9 的 2%） |
+| `ref_joint_pos_upper`（上 17 关节，新增） | — | — | **1.5** | 补 exp1 归零误伤的手臂监督；底模 dof_pos 分布贴近 AMP demo 流形 |
+
+env：`_reward_ref_joint_pos` 切 `leg_dof_indices` 12 列；新增 `_reward_ref_joint_pos_upper` 切 `upper_dof_indices` 17 列。
+
+### 修改六：治拖步 + 防滑行
+
+| 参数 | exp0.3 | exp0.4 | 说明 |
+| --- | --- | --- | --- |
+| `action_smoothness` | -0.02 | **-0.012** | 松绑抬腿动态（exp0.2 -0.008 抬脚正常、exp0.3 -0.02 压死，取中间值） |
+| `feet_clearance` | 1.0 | **1.5** | 抬脚收益对冲动态成本 |
+| `feet_air_time` | 1.2 | **1.6** | 同上 |
+| `foot_slip` | -0.1 | **-0.3** | σ20 后"贴地滑行"可拿满 tracking，预堵新捷径（0.4m/s 滑行罚 0.06→0.19/步） |
+
+保持不动：σ20 / low_speed 1.0(-2) / action_scale 0.3 / clip 3 / gait [stand,walk,stand] / stand_still 3.5。
+
+### 4. 修改文件
+
+- `humanoid/envs/x1/x1_dh_stand_config.py`：修改四/五/六（9 处）
+- `humanoid/envs/x1/x1_dh_stand_env.py`：ref 拆分（~15 行）
+- `resources/robots/meshes/`：**物化软链接为真实目录**（98 STL，补 right_wrist_roll_physically_mirrored）+ `resources/motions/processed/ref_lib.pt` 强制入库（commit a1c94a3）
+
+### 5. 训练参数
+
+| 参数 | 值 |
+| --- | --- |
+| 训练方式 | 从零 |
+| GM账号 | limxmt8fzq961ur9q2@emalupe.com |
+| 算力 | 4090D（ESKU000001，¥5.4/h）——**4090D 不支持个人存储挂载**（code 601），去掉 personalDataPath |
+| 镜像 | BJX00000001 / V000124 |
+| 代码仓库 | github.com/Lee-Weather/X1_29_noamp @ master |
+| 启动命令 | `gm-run X1_29_noamp/humanoid/scripts/train.py --task=x1_dh_stand --run_name=exp0_4_base --headless --max_iterations=6000` |
+
+### 6. 预期与验收
+
+| 指标 | exp0.3 | 目标 | 异常信号 |
+| --- | --- | --- | --- |
+| 0.4/0.6 稳态 | 5%/-2% | 80-120% | <60% |
+| 抬脚峰值/腾空 | ≤1.7cm / 0ms | ≥5cm / ≥250ms | air_time≈0 @it2000 |
+| 摔倒/40s | 0 | 0 | >0 |
+| 摆臂 | 端平 | 贴 mocap 节律 | rew_upper<0.5 |
+
+### 7. 实验结果
+
+> v1 任务 TASK_20260908_283 启动即废：**云端 mesh 解析失败崩溃（exit -11）**——URDF 引用 `../../meshes/*`（= resources/robots/meshes/），该路径在 Ubuntu 上是软链接，**Windows 复制项目时软链接丢失**，git 仓库里从未存在该目录。修复：物化真实目录 + 补齐缺失的 right_wrist_roll_physically_mirrored.STL + ref_lib.pt 入库（commit a1c94a3）。22 分钟无日志即失败，argo 主日志定位。
+>
+> v2 任务 TASK_20260908_301 正常训练完成（6000 iter，4.65h，¥25.1）。
+
+#### 最终结果（iter 6000）
+
+| 指标 | it2176 | it5999（终） | 判定 |
+| --- | --- | --- | --- |
+| Mean reward | 42.66 | 53.31 | 缓慢爬升无平台 |
+| Mean episode length | 776 | 863（上限 2400 的 36%） | ❌ |
+| **rew_feet_air_time** | 0.0003 | **0.0004** | ❌ **全程≈0，摆动相从未出现** |
+| **rew_feet_clearance** | 0.003 | 0.007 | ❌ 同上 |
+| rew_foot_slip | -0.140 | -0.165 | ⚠️ 滑行罚恶化 |
+| rew_tracking_lin_vel | 0.077 | 0.118 | 低（σ20 压扁属预期） |
+| rew_ref_joint_pos / upper | 0.23 / 0.34 | 0.26 / 0.37 | 形态学了个半吊 |
+| rew_stand_still | 0.54 | 0.71 | ✅ 站立吸引子强化 |
+
+**结论**：❌ 失败——策略收敛到"贴地微动"：站立吸引子完胜，ref 1.0 拉力不足以拉出摆动相，feet_air_time/clearance 稀疏奖励从站立态出发接触不到梯度。训练指标已充分判死，未做回放（三件套不完整，仅 model_6000.pt 归档 czy/data/exp0.5/ 目录代管）。
+
+**根因分析**：
+
+1. **ref 1.0 拉力不足（主因）**：本项目管线中策略从未"自主"学会迈步——历史上每次会走都是腿部参考强拉（legacy 正弦 2.2 / exp0.2 mocap 2.4）。1.0 的位姿匹配拉力 vs 站立吸引子（stand_still 3.5 + 零风险）完败
+2. σ20+low_speed 重罚面与"从零学走"不兼容：迈步需先跨越不稳定期才有收益，探索成本被放大（此判断 exp0.5 部分修正，见下）
+3. 摔倒零罚（当时未发现，exp0.5 定性为根本漏洞）
+
+**下一轮方向（exp0.5）**：ref_joint_pos 恢复 2.4+ 强拉力，其余 exp0.4 面孔保持。
+
+---
+
+## 实验 exp0.5：ref_joint_pos 2.5 恢复强拉力——步态形首次出现，发现摔倒罚缺失根本漏洞（2026-09-09）
+
+### 1. 上一实验结果与教训
+
+> 数据：exp0.4 model_6000（reward 53.31、ep_len 863、**feet_air_time 0.0004 全程≈0**、foot_slip -0.165、stand_still 0.71）
+>
+> **核心教训**：
+> - exp0.4 实证：ref 1.0 拉力不足，摆动相从未出现，站立吸引子完胜——主次矛盾从 exp0.3 的"动而无位移"转变为"根本不动"
+> - 用户判断：exp0.3 ref 2.4 腿都拉动了，降到 1.0 怎么可能动？——拉力必须恢复
+
+### 2. 本轮修改目标
+
+- 目标1：feet_air_time/clearance 脱离零值（摆动相出现）
+- 目标2：0.4/0.6 稳态跟踪 80-120%
+- 目标3：零摔倒、cmd=0 停住
+- 验收标准：目标 1+2+3 同时满足
+
+### 3. 修改内容
+
+### 修改七：ref_joint_pos 1.0→2.5
+
+| 参数 | exp0.4 | exp0.5 | 说明 |
+| --- | --- | --- | --- |
+| `ref_joint_pos`（腿） | 1.0 | **2.5** | 主次矛盾转换：先让腿动起来；白拿 ref 分 ~0.24/步 远小于 σ20+low_speed 已就位的位移纪律；摆动相出现后 air_time/clearance 稀疏奖励才有梯度可接 |
+
+其余全部保持 exp0.4 面孔（与 exp0.3 的差异面：σ20 / low_speed 1.0(-2) / smoothness -0.012 / air 1.6 / clearance 1.5 / slip -0.3 / ref_upper 1.5 / lr 3e-4）。
+
+### 4. 修改文件
+
+- `humanoid/envs/x1/x1_dh_stand_config.py`：修改七（1 处，commit 32277b9）
+
+### 5. 训练参数
+
+| 参数 | 值 |
+| --- | --- |
+| 训练方式 | 从零 |
+| GM账号 | limxmt8fzq961ur9q2@emalupe.com |
+| 算力 | 4090D（ESKU000001） |
+| 启动命令 | `gm-run X1_29_noamp/humanoid/scripts/train.py --task=x1_dh_stand --run_name=exp0_5_ref25 --headless --max_iterations=6000` |
+
+### 6. 预期与验收
+
+| 指标 | exp0.4 | 目标 | 异常信号 |
+| --- | --- | --- | --- |
+| rew_feet_air_time | 0.0004 | 脱离零值 | it2000 仍≈0 → 假设证伪 |
+| rew_ref_joint_pos | 0.26@w1.0 | 显著高于同期 | — |
+| 0.4/0.6 稳态 | — | 80-120% | — |
+| 摔倒/40s | — | 0 | — |
+
+### 7. 实验结果
+
+> 任务 TASK_20260909_036：**it 3655/6000 因账号额度耗尽被平台终止**（3.3h，本账号 exp0.4+exp0.5 累计消费逼近 ¥50 预算），reward 曲线仍在爬升中（43.78 无平台）。最高 checkpoint model_3600。
+> 另：L4 对照任务 TASK_20260909_036 同批创建失败（平台侧 401 + 任务列表不可见），放弃。
+
+#### 训练数据（it 3655）
+
+| 指标 | exp0.4@5999 | exp0.5@3655 | 判读 |
+| --- | --- | --- | --- |
+| rew_ref_joint_pos | 0.26@w1.0 | **0.54@w2.5**（raw 0.216） | ✅ 腿匹配恢复至 exp0.3 水平（raw 0.236）——腿动起来了 |
+| rew_feet_air_time | 0.0004 | 0.0003 | ⚠️ 仍≈0（回放证实为"抬脚高但 episode 短"的统计假象，见回放） |
+| ep_len | 863 | **629（27%）** | ❌ 频繁摔倒 |
+| Mean reward | 53.31@6000 | 43.78@3655 | 爬升中被掐断 |
+
+#### 回放结果（model_3200，201.5 服务器，post-201-5 流程）
+
+> 部署坑：OSS 签名 URL 含 `%2B` 时本地 curl 报 SignatureDoesNotMatch（flux 返回的 URL 对含 +/- 的签名存在编码缺陷）——绕过：枚举全部 checkpoint 选纯字母数字签名的 model_3200；201.5 无公网出口，本地走 socks5 代理（10.12.201.122:39000）下载后 scp。
+
+Speed Profile Summary（速度阶梯 0→0.4→0.6→0）：
+
+| 段 | cmd | avg_real | 判读 |
+| --- | --- | --- | --- |
+| 站立 | 0.00 | 0.004 m/s | 站得住 |
+| 前进 | 0.40 | 0.535 m/s | **均值失真**（摔倒猛冲+reset 混合平均） |
+| 前进 | 0.60 | 0.723 m/s | 同上 |
+| 停止 | 0.00 | 0.146 m/s | 压线 |
+
+CSV 深度分析（czy/analysis/exp0_5_foot_analysis.py，S0/S1 段）：
+
+| 指标 | exp0.3（拖步） | exp0.5@3200 | 判定 |
+| --- | --- | --- | --- |
+| 抬脚峰值（S1） | 1.7 / 0.9 cm | **27.4 / 16.2 cm** | ✅ 步态形首次出现 |
+| 摆动窗腾空 | 左脚 0ms | **373 / 540ms** | ✅ |
+| clearance 带占比 | 0% | 32-43% | ✅ |
+| base_height min | 0.547（无摔） | **0.169（摔倒）** | ❌ |
+| 摆臂幅度 | 端平 | 0.49-0.86 rad | ✅ 出现（偏大待收敛） |
+
+**结论**：❌ 未达标——ref 2.5 假设的前半段验证成功（摆动相出现、拖步全面逆转），但**一迈步就摔**（用户目视确认；Summary 均值掩盖摔倒，深度分析 base_height min=0.169 与 ep_len 629 证实）。三件套归档 czy/data/exp0.5/（model_3200_exp05.pt + play_output.mp4 + isaac_diag.csv；model_3600 为续训备选底模）。
+
+**根因分析（本轮最重要发现）**：
+
+1. **termination 摔倒罚全程缺失（根本漏洞，全历史）**：
+   - 基类默认 `termination = -0.0`（legged_robot_config.py L281），X1DHStandCfg.scales 完全重写且无 termination 键 → `if "termination" in reward_scales` 恒 False（legged_robot.py L360）
+   - legged_robot.py L357-363 专门设计 only_positive clip 后叠加 termination（防负罚被清零），但 scales 无键导致整条通路失效
+   - 因果链：摔倒 = 零罚 + only_positive 清零摔前负奖励 + 免费重置新 episode（重拿出生奖励）→ 摔是奖励上可行解 → 策略毫无学平衡压力 → "一迈步就摔"且训练无动于衷
+   - ep_len 629（27%）早已预告；4096 env 平均掩盖摔倒率，训练-回放背离的**共同根源**（exp0.2/0.3/0.5 全部适用）
+2. 抬脚峰值 27cm 远超带 [0.03,0.06]——带外无罚，策略疯抬脚换 air_time 分，大步蹬伸致质心飞出支撑域（次要，termination 修复后策略自会收敛步幅）
+
+**下一轮方向（exp0.6）**：补 termination=-50 + resume model_3600 续训收敛。
+
+---
+
+## 实验 exp0.6：补 termination 摔倒罚 + resume 续训收敛（2026-09-10 方案）
+
+> 晋级依据：奖励结构补根本漏洞（新增 termination 键）+ resume——修改编号继承，修改八。
+
+### 1. 上一实验结果与教训
+
+> 数据：exp0.5 model_3600（3655/6000 终止；回放 model_3200：步态形出现——抬脚 27/16cm、腾空 373/540ms、带占比 32-43%；但一迈步就摔——base_height min 0.169、ep_len 629）
+>
+> **核心教训**：
+> - ref 2.5 强拉力成功拉出摆动相（exp0.4 证伪 1.0）
+> - **摔倒零罚是全历史根本漏洞**：摔=免费重置，策略无学平衡压力；ep_len 629 是唯一诚实的健康指标
+> - exp1.2"监控三绿假阳性"教训的制度化：**ep_len 必须纳入异常信号**（<1000 即预报摔倒主导）
+
+### 2. 本轮修改目标
+
+- 目标1：ep_len 629 → **>1500**（摔倒率大幅下降）
+- 目标2：保住 exp0.5 步态形（抬脚 ≥5cm、腾空 ≥250ms）
+- 目标3：0.4/0.6 稳态 80-120%、cmd=0 停住 <0.15
+- 验收标准：ep_len >1500 且回放零摔倒
+
+### 3. 修改内容
+
+### 修改八：新增 termination 摔倒罚
+
+| 参数 | 旧值 | 新值 | 说明 |
+| --- | --- | --- | --- |
+| `rewards.scales.termination` | 缺失（=0） | **-50** | 摔倒重罚；legged_robot.py 在 only_positive clip 后单独叠加，负罚可生效；timeout 不罚（~time_out_buf）；fallback：若策略转站桩，-50→-20 重训 |
+
+其余全部保持 exp0.5 面孔（ref 腿 2.5/上 1.5、σ20、low_speed 1.0(-2)、smoothness -0.012、air 1.6、clearance 1.5、slip -0.3、lr 3e-4）。
+
+### 4. 修改文件
+
+- `humanoid/envs/x1/x1_dh_stand_config.py`：修改八（1 行）
+
+### 5. 训练参数
+
+| 参数 | 值 |
+| --- | --- |
+| 训练方式 | **resume** exp0.5 model_3600（--ckpt_path 直连，load_optimizer=False） |
+| max_iterations | 3000（增量） |
+| GM账号 | 待定（当前账号额度耗尽，api_key.json 备用账号轮换） |
+| 算力 | 4090D（ESKU000001）或 L4 |
+| 启动命令 | `gm-run X1_29_noamp/humanoid/scripts/train.py --task=x1_dh_stand --run_name=exp0_6_term --headless --max_iterations=3000 --ckpt_path=<model_3600>` |
+
+### 6. 预期与验收
+
+| 指标 | exp0.5@3655 | 目标 | 异常信号 |
+| --- | --- | --- | --- |
+| ep_len | 629 | **>1500 且上行** | <800 持平 → 罚未生效或转站桩 |
+| rew_feet_air_time | 0.0003 | 保持非零（步态保留） | →0 = 站桩化，降罚 |
+| rew_termination | — | 由 0 转负后趋 0（摔倒率下降） | 恒大负 = 还在摔 |
+| 回放 0.4 段 | 迈步即摔 | 不摔、vx 0.32-0.48 | — |
+
+### 7. 实验结果
+
+> 待训练完成后补充。
