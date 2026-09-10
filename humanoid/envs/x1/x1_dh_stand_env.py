@@ -154,15 +154,19 @@ class X1DHStandEnv(LeggedRobot):
         return phase
 
     def _current_seg_id(self):
-        """指令 → 参考段索引（向量化）。|wz|>0.15→walk_turn；|vx|<0.25→walk_slow；else→walk_norm"""
+        """指令 → 参考段索引（向量化，顺序执行后面覆盖前面）：
+        |wz|>0.15→walk_turn；0.25≤|vx|<0.5→walk_yz（yz 慢走，优雅风格）；|vx|<0.25→walk_slow；else→walk_norm"""
         wz = self.commands[:, 2]
         vx = self.commands[:, 0]
         turn = self.seg_names.index("walk_turn")
         slow = self.seg_names.index("walk_slow")
         norm = self.seg_names.index("walk_norm")
         seg_id = torch.full_like(self.phase_length_buf, norm)
-        seg_id[torch.abs(vx) < 0.25] = slow
-        seg_id[torch.abs(wz) > 0.15] = turn
+        seg_id[torch.abs(vx) < 0.25] = slow            # 极慢速（<0.25）→ walk_slow
+        if "walk_yz" in self.seg_names:                # 0.25~0.5 → walk_yz（兼容旧 ref_lib 无此段）
+            yz = self.seg_names.index("walk_yz")
+            seg_id[(torch.abs(vx) >= 0.25) & (torch.abs(vx) < 0.5)] = yz
+        seg_id[torch.abs(wz) > 0.15] = turn            # 转向 → walk_turn
         return seg_id
 
     def _get_stance_mask(self):
