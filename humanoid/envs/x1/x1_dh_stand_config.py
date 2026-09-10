@@ -425,6 +425,9 @@ class X1DHStandCfg(LeggedRobotCfg):
             dof_vel_limits = -1
             dof_pos_limits = -10.
             dof_torque_limits = -0.1
+            # exp0.6: termination 摔倒罚（补全历史漏洞——基类默认 -0.0，scales 此前无此键 → 摔倒免费重置）
+            # legged_robot.py 在 only_positive clip 后单独叠加本项，负罚不被清零；timeout 不罚（~time_out_buf）
+            termination = -50
 
     # ---- exp1: AMP 判别器（env 侧开关；算法侧超参见 X1DHStandCfgPPO.algorithm 的 amp_* 平铺键）----
     class amp:
