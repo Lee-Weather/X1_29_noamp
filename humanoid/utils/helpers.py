@@ -137,17 +137,21 @@ def get_load_path(root, load_run=-1, checkpoint=-1):
 
 
 def resolve_ckpt_path(path):
-    """--ckpt_path 直连加载解析：精确路径优先；缺失时在仓库内搜 model_*.pt 兜底
-    （云端 checkpoint 挂载位置随 checkPointMountPath 配置而变，兜底消除不确定性）。
+    """--ckpt_path 直连加载解析：绝对/cwd 相对路径优先；其次按仓库根解析（与 cwd 解耦，
+    云端 gm-run cwd=/workspace 而非仓库根）；最后仓库内递归搜 model_*.pt 兜底。
     注意：仅在启动时调用一次，不会误捕训练中途新存的 ckpt。"""
     import glob
     if os.path.isfile(path):
         return path
-    root = LEGGED_GYM_ROOT_DIR
-    cands = sorted(
-        glob.glob(os.path.join(root, "model_*.pt"))
-        + glob.glob(os.path.join(root, "*", "model_*.pt"))
-        + glob.glob(os.path.join(root, "logs", "**", "model_*.pt"), recursive=True))
+    # 仓库根相对解析（path 形如 resources/motions/model_3600.pt 时命中）
+    in_root = os.path.join(LEGGED_GYM_ROOT_DIR, path)
+    if os.path.isfile(in_root):
+        print("[CKPT] 按仓库根解析: {} -> {}".format(path, in_root))
+        return in_root
+    # 仓库内递归兜底（排除 logs/，避免误命中训练中途产物）
+    cands = [c for c in sorted(glob.glob(os.path.join(
+        LEGGED_GYM_ROOT_DIR, "**", "model_*.pt"), recursive=True))
+        if os.sep + "logs" + os.sep not in c]
     if cands:
         print("[CKPT] 指定路径 {} 不存在，仓库内兜底命中: {}".format(path, cands[-1]))
         return cands[-1]
